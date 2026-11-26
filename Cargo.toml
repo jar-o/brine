@@ -1,0 +1,19 @@
+[package]
+name = "brine"
+version = "0.1.0"
+edition = "2024"
+description = "Encrypt a file to one or more age recipients, then store it on Walrus"
+publish = false
+
+[dependencies]
+# rage's library crate (https://github.com/str4d/rage), published on crates.io as `age`.
+age = "0.12"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+home = "0.5"
+rpassword = "7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The Walrus SDK is not published on crates.io, so it is pulled from git, pinned to the same
+# commit as the `walrus` CLI built locally (client version 1.62.0).
+walrus-sdk = { git = "https://github.com/MystenLabs/walrus", rev = "2bd352b6a668bf6d73416536f9b2ed9beed61e84" }
