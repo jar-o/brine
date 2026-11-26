@@ -55,6 +55,20 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Delete a blob you stored from Walrus (frees its storage; local keys are kept)
+    Wipe {
+        /// Walrus blob ID
+        blob_id: String,
+        /// Walrus network context from the client config (for example `testnet`)
+        #[arg(long, default_value = DEFAULT_CONTEXT)]
+        context: String,
+        /// Delete without asking for confirmation
+        #[arg(long)]
+        do_it: bool,
+        /// Path to a Walrus client config (default: the standard locations, then built-in)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Download a blob from Walrus and decrypt it to --out
     Fetch {
         /// Walrus blob ID
@@ -106,6 +120,12 @@ async fn main() -> Result<()> {
             };
             store(file, recipients, options).await
         }
+        Command::Wipe {
+            blob_id,
+            context,
+            do_it,
+            config,
+        } => wipe(&blob_id, &context, do_it, config).await,
         Command::Fetch {
             blob_id,
             out,
@@ -202,6 +222,35 @@ async fn store(file: PathBuf, recipients: Vec<String>, options: StoreOptions) ->
     Ok(())
 }
 
+async fn wipe(
+    blob_id: &str,
+    context: &str,
+    do_it: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    if !do_it {
+        eprintln!();
+        eprintln!("WARNING: about to delete blob {blob_id} from Walrus ({context})");
+        eprintln!();
+        eprintln!("  * Only deletable blobs owned by your Sui wallet can be deleted.");
+        eprintln!("  * This costs SUI (gas) and frees the blob's storage for reuse.");
+        eprintln!("  * It does not recall copies. Anyone who already downloaded the ciphertext");
+        eprintln!("    keeps it, and storage nodes may serve it until they clean it up.");
+        eprintln!("  * Local keys in ~/.brine/{blob_id}/ are NOT removed.");
+        eprintln!();
+        confirm_yes("delete? [y/N] ", "aborted; nothing was deleted")?;
+    }
+    let deleted = walrus::delete(blob_id, context, config_path.as_deref()).await?;
+    if deleted == 0 {
+        bail!(
+            "no deletable blob {blob_id} is owned by this wallet on {context} \
+             (wrong network, wrong wallet, already deleted or expired, or stored as permanent)"
+        );
+    }
+    println!("deleted {deleted} blob object(s) for {blob_id}");
+    Ok(())
+}
+
 async fn fetch(
     blob_id: &str,
     out: PathBuf,
@@ -262,16 +311,21 @@ fn confirm(
     eprintln!("    passphrase for new key files) and the data is gone. New key files will be");
     eprintln!("    moved to ~/.brine/<blob-id>/.");
     eprintln!();
+    confirm_yes("upload? [y/N] ", "aborted; nothing was uploaded")
+}
+
+/// Asks a yes/no question on the terminal. Fails unless the answer is yes.
+fn confirm_yes(question: &str, refusal: &str) -> Result<()> {
     if !io::stdin().is_terminal() {
-        bail!("not an interactive terminal; pass --do-it to upload without confirmation");
+        bail!("not an interactive terminal; pass --do-it to skip the confirmation");
     }
-    eprint!("upload? [y/N] ");
+    eprint!("{question}");
     io::stderr().flush().ok();
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
     if matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
         Ok(())
     } else {
-        bail!("aborted; nothing was uploaded")
+        bail!("{refusal}")
     }
 }

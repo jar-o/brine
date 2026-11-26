@@ -10,7 +10,10 @@ use walrus_sdk::{
     },
     core::{BlobId, encoding::Primary},
     node_client::{StoreArgs, StoreBlobsApi as _, WalrusNodeClient},
-    sui::{client::retry_client::RetriableSuiClient, config::WalletConfig},
+    sui::{
+        client::{SuiContractClient, retry_client::RetriableSuiClient},
+        config::WalletConfig,
+    },
 };
 
 /// Loads the client config for `context`.
@@ -39,13 +42,11 @@ fn load_config(config_path: Option<&Path>, context: &str) -> Result<ClientConfig
     }
 }
 
-/// Uploads `ciphertext` and returns its blob ID.
-pub async fn store(
-    ciphertext: &[u8],
-    context: &str,
-    epochs: u32,
+/// Builds a client that can send transactions from the local Sui wallet.
+async fn contract_client(
     config_path: Option<&Path>,
-) -> Result<String> {
+    context: &str,
+) -> Result<WalrusNodeClient<SuiContractClient>> {
     let config = load_config(config_path, context)?;
     let wallet = WalletConfig::load_wallet(
         config.wallet_config.as_ref(),
@@ -57,7 +58,26 @@ pub async fn store(
     let refresher = config
         .build_refresher_and_run(sui_client.read_client().clone())
         .await?;
-    let client = WalrusNodeClient::new_contract_client(config, refresher, sui_client)?;
+    Ok(WalrusNodeClient::new_contract_client(
+        config, refresher, sui_client,
+    )?)
+}
+
+/// Parses a blob ID.
+fn parse_blob_id(blob_id: &str) -> Result<BlobId> {
+    blob_id
+        .parse()
+        .map_err(|error| anyhow!("invalid blob id `{blob_id}`: {error}"))
+}
+
+/// Uploads `ciphertext` and returns its blob ID.
+pub async fn store(
+    ciphertext: &[u8],
+    context: &str,
+    epochs: u32,
+    config_path: Option<&Path>,
+) -> Result<String> {
+    let client = contract_client(config_path, context).await?;
 
     let args = StoreArgs::default_with_epochs(epochs);
     let results = client
@@ -74,9 +94,7 @@ pub async fn store(
 
 /// Downloads the blob with the given ID.
 pub async fn fetch(blob_id: &str, context: &str, config_path: Option<&Path>) -> Result<Vec<u8>> {
-    let blob_id: BlobId = blob_id
-        .parse()
-        .map_err(|error| anyhow!("invalid blob id `{blob_id}`: {error}"))?;
+    let blob_id = parse_blob_id(blob_id)?;
     let config = load_config(config_path, context)?;
 
     let rpc_urls = if config.rpc_urls.is_empty() {
@@ -91,4 +109,11 @@ pub async fn fetch(blob_id: &str, context: &str, config_path: Option<&Path>) -> 
     let client = WalrusNodeClient::new_read_client_with_refresher(config, read_client).await?;
 
     Ok(client.read_blob::<Primary>(&blob_id).await?)
+}
+
+/// Deletes the deletable blobs with this ID that the wallet owns, and returns how many.
+pub async fn delete(blob_id: &str, context: &str, config_path: Option<&Path>) -> Result<usize> {
+    let blob_id = parse_blob_id(blob_id)?;
+    let client = contract_client(config_path, context).await?;
+    Ok(client.delete_owned_blob(&blob_id).await?)
 }

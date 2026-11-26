@@ -27,6 +27,14 @@ brine fetch <blob-id> --context testnet --out secret.txt
 brine fetch <blob-id> --key /Volumes/USB/key-1.age --out secret.txt
 ```
 
+## Deleting a blob
+
+```bash
+brine wipe <blob-id> --context testnet
+```
+
+`brine store` uploads deletable blobs, and `brine wipe` deletes them using the wallet that stored them. It asks for confirmation unless `--do-it` is given, and it leaves `~/.brine/<blob-id>/` alone. Deleting frees the storage on Walrus but cannot recall copies that anyone already downloaded, and nodes may serve the data until they clean it up. It fails if the wallet owns no deletable blob with that ID.
+
 ## Non-interactive use
 
 Both commands take `--passphrase-file <path>`, which reads the first line of the file instead of prompting. Use `-` to read it from stdin, for example from a keychain or password manager:

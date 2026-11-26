@@ -46,6 +46,10 @@ Keep these properties when changing the code:
 - Passphrases are read with `rpassword` (no echo) and held as `SecretString`. Never log or print them or the private keys.
 - Long options only (`--out`, not `-out` or `-o`). Don't add single-dash flags.
 
+## Wipe flow
+
+`brine wipe <blob-id>` calls `walrus::delete`, which uses `WalrusNodeClient::delete_owned_blob`. That only deletes blobs that are deletable and owned by the wallet. `store` relies on `StoreArgs::default_with_epochs` being deletable, so do not switch uploads to permanent without updating `wipe`. Wipe never touches the local key directory. It is untested against a live network.
+
 ## Conventions
 
 - `--context` defaults to `mainnet`. Pass `testnet` to avoid spending real funds when testing.
