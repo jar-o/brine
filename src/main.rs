@@ -48,6 +48,9 @@ enum Command {
         /// Upload without asking for confirmation
         #[arg(long)]
         do_it: bool,
+        /// Read the new key passphrase from this file (`-` for stdin) instead of prompting
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
         /// Path to a Walrus client config (default: the standard locations, then built-in)
         #[arg(long)]
         config: Option<PathBuf>,
@@ -65,6 +68,9 @@ enum Command {
         /// Key file to use instead of the ones in ~/.brine/<blob-id>/ (can be repeated)
         #[arg(long = "key")]
         keys: Vec<PathBuf>,
+        /// Read the passphrase from this file (`-` for stdin) instead of prompting
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
         /// Path to a Walrus client config (default: the standard locations, then built-in)
         #[arg(long)]
         config: Option<PathBuf>,
@@ -88,26 +94,46 @@ async fn main() -> Result<()> {
             context,
             epochs,
             do_it,
+            passphrase_file,
             config,
-        } => store(file, recipients, &context, epochs, do_it, config).await,
+        } => {
+            let options = StoreOptions {
+                context,
+                epochs,
+                do_it,
+                passphrase_file,
+                config,
+            };
+            store(file, recipients, options).await
+        }
         Command::Fetch {
             blob_id,
             out,
             context,
             keys,
+            passphrase_file,
             config,
-        } => fetch(&blob_id, out, &context, keys, config).await,
+        } => fetch(&blob_id, out, &context, keys, passphrase_file, config).await,
     }
 }
 
-async fn store(
-    file: PathBuf,
-    recipients: Vec<String>,
-    context: &str,
+struct StoreOptions {
+    context: String,
     epochs: u32,
     do_it: bool,
-    config_path: Option<PathBuf>,
-) -> Result<()> {
+    passphrase_file: Option<PathBuf>,
+    config: Option<PathBuf>,
+}
+
+async fn store(file: PathBuf, recipients: Vec<String>, options: StoreOptions) -> Result<()> {
+    let StoreOptions {
+        context,
+        epochs,
+        do_it,
+        passphrase_file,
+        config: config_path,
+    } = options;
+    let context = context.as_str();
     if epochs == 0 {
         bail!("--epochs must be at least 1");
     }
@@ -124,10 +150,15 @@ async fn store(
     // Without --recipient, one new key is generated; with it, only the given keys are used.
     let generate = supplied.is_empty();
     // A passphrase is only needed to protect a newly generated private key.
-    let passphrase = if generate {
-        Some(keystore::prompt_new_passphrase()?)
-    } else {
+    let passphrase = if !generate {
+        if passphrase_file.is_some() {
+            bail!("--passphrase-file only applies when a new key is generated (no --recipient)");
+        }
         None
+    } else if let Some(path) = &passphrase_file {
+        Some(keystore::read_passphrase_file(path)?)
+    } else {
+        Some(keystore::prompt_new_passphrase()?)
     };
 
     eprintln!("encrypting...");
@@ -176,6 +207,7 @@ async fn fetch(
     out: PathBuf,
     context: &str,
     key_files: Vec<PathBuf>,
+    passphrase_file: Option<PathBuf>,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
     if out.exists() {
@@ -186,9 +218,12 @@ async fn fetch(
     } else {
         key_files
     };
-    let passphrase = rpassword::prompt_password("passphrase: ")
-        .context("cannot read passphrase")?
-        .into();
+    let passphrase = match &passphrase_file {
+        Some(path) => keystore::read_passphrase_file(path)?,
+        None => rpassword::prompt_password("passphrase: ")
+            .context("cannot read passphrase")?
+            .into(),
+    };
 
     eprintln!("reading blob {blob_id} from Walrus ({context})...");
     let ciphertext = walrus::fetch(blob_id, context, config_path.as_deref()).await?;

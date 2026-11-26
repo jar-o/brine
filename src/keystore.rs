@@ -4,7 +4,7 @@
 
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, BufRead, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +37,48 @@ pub fn prompt_new_passphrase() -> Result<SecretString> {
         bail!("the passphrases do not match");
     }
     Ok(first.into())
+}
+
+/// Reads a passphrase from `path`, or from stdin when `path` is `-`.
+///
+/// Only the first line is used, without its line ending. On Unix a file that group or others can
+/// access is refused, like `ssh` does for private keys.
+pub fn read_passphrase_file(path: &Path) -> Result<SecretString> {
+    let text = if path == Path::new("-") {
+        let mut line = String::new();
+        io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .context("cannot read the passphrase from stdin")?;
+        line
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(path)
+                .with_context(|| format!("cannot read {}", path.display()))?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                bail!(
+                    "{} is accessible by other users (mode {:o}); run `chmod 600` on it",
+                    path.display(),
+                    mode & 0o777
+                );
+            }
+        }
+        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
+    };
+    first_line_passphrase(&text)
+}
+
+/// Takes the first line of `text` as the passphrase. Rejects an empty one.
+fn first_line_passphrase(text: &str) -> Result<SecretString> {
+    let line = text.lines().next().unwrap_or("");
+    if line.is_empty() {
+        bail!("the passphrase must not be empty");
+    }
+    Ok(line.to_owned().into())
 }
 
 /// Writes the key files to a hidden staging directory inside the key store.
@@ -144,4 +186,77 @@ fn create_private_dir(path: &Path) -> Result<()> {
     builder
         .create(path)
         .with_context(|| format!("cannot create {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use age::secrecy::ExposeSecret;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("brine-ks-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_with_mode(path: &Path, text: &str, mode: u32) {
+        fs::write(path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+    }
+
+    #[test]
+    fn passphrase_file_uses_first_line_without_line_ending() {
+        let dir = scratch("first_line");
+        for (name, text) in [
+            ("lf", "hunter 2\nignored\n"),
+            ("crlf", "hunter 2\r\n"),
+            ("bare", "hunter 2"),
+        ] {
+            let path = dir.join(name);
+            write_with_mode(&path, text, 0o600);
+            let pass = read_passphrase_file(&path).unwrap();
+            assert_eq!(pass.expose_secret(), "hunter 2", "{name}");
+        }
+    }
+
+    #[test]
+    fn passphrase_file_rejects_empty() {
+        let dir = scratch("empty");
+        for (name, text) in [("zero", ""), ("newline", "\n")] {
+            let path = dir.join(name);
+            write_with_mode(&path, text, 0o600);
+            assert!(read_passphrase_file(&path).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn passphrase_file_missing_is_an_error() {
+        let dir = scratch("missing");
+        assert!(read_passphrase_file(&dir.join("nope")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passphrase_file_rejects_group_or_world_access() {
+        let dir = scratch("perms");
+        for mode in [0o640, 0o604, 0o644, 0o660, 0o666] {
+            let path = dir.join(format!("p{mode:o}"));
+            write_with_mode(&path, "secret\n", mode);
+            let error = read_passphrase_file(&path).unwrap_err().to_string();
+            assert!(
+                error.contains("accessible by other users"),
+                "{mode:o}: {error}"
+            );
+        }
+        let ok = dir.join("ok");
+        write_with_mode(&ok, "secret\n", 0o400);
+        assert!(read_passphrase_file(&ok).is_ok());
+    }
 }

@@ -27,6 +27,16 @@ brine fetch <blob-id> --context testnet --out secret.txt
 brine fetch <blob-id> --key /Volumes/USB/key-1.age --out secret.txt
 ```
 
+## Non-interactive use
+
+Both commands take `--passphrase-file <path>`, which reads the first line of the file instead of prompting. Use `-` to read it from stdin, for example from a keychain or password manager:
+
+```bash
+security find-generic-password -s brine -w | brine fetch <blob-id> --passphrase-file - --out secret.txt
+```
+
+A passphrase file must not be accessible by group or others (`chmod 600`). Keeping it next to the key files defeats the passphrase, so prefer stdin from a secret store. For `store`, the flag sets the passphrase for a newly generated key, and it is an error together with `--recipient`.
+
 ## Things to know
 
 - Uploading spends SUI (gas) and WAL (storage) from your Sui wallet.
