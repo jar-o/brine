@@ -14,10 +14,37 @@ use age::{
 };
 use anyhow::{Context, Result, bail};
 
+/// Bytes that came out of age encryption.
+///
+/// The only way to construct one outside of tests is [`seal`], and [`crate::walrus::store`]
+/// accepts nothing else, so the compiler stops a cleartext `Vec<u8>` from being uploaded.
+pub struct Ciphertext(Vec<u8>);
+
+impl Ciphertext {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Wraps arbitrary bytes without encrypting them. Tests use it to prove the upload path
+    /// refuses anything that is not age ciphertext; it does not exist in release builds.
+    #[cfg(test)]
+    pub fn unchecked_for_test(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
+impl std::ops::Deref for Ciphertext {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Everything produced by [`seal`].
 pub struct Bundle {
     /// The age file for the plaintext, encrypted to every recipient.
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: Ciphertext,
     /// One passphrase-protected private key per recipient, as `(file name, age file bytes)`.
     pub keys: Vec<(String, Vec<u8>)>,
     /// The public keys, one per line.
@@ -66,7 +93,7 @@ pub fn seal(
     }
     let recipients = recipients.iter().map(|r| format!("{r}\n")).collect();
     Ok(Bundle {
-        ciphertext,
+        ciphertext: Ciphertext(ciphertext),
         keys,
         recipients,
     })
@@ -164,7 +191,7 @@ mod tests {
             let out = open(&bundle.ciphertext, std::slice::from_ref(file), &pass).unwrap();
             assert_eq!(out, b"top secret");
         }
-        assert_ne!(bundle.ciphertext, b"top secret");
+        assert_ne!(&bundle.ciphertext[..], b"top secret");
     }
 
     #[test]

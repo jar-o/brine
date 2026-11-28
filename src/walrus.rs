@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use crate::vault::Ciphertext;
+use age::Decryptor;
 use anyhow::{Context, Result, anyhow, bail};
 use walrus_sdk::{
     config::{
@@ -70,18 +72,32 @@ fn parse_blob_id(blob_id: &str) -> Result<BlobId> {
         .map_err(|error| anyhow!("invalid blob id `{blob_id}`: {error}"))
 }
 
+/// Fails unless `bytes` start with a well-formed age header.
+///
+/// Last line of defence before an upload: `store` takes a [`Ciphertext`], which only encryption
+/// can produce, and this check makes sure that what it holds really is an age file.
+fn ensure_age_ciphertext(bytes: &[u8]) -> Result<()> {
+    Decryptor::new_buffered(bytes).map(drop).map_err(|error| {
+        anyhow!("refusing to upload: the data is not an age-encrypted file ({error})")
+    })
+}
+
 /// Uploads `ciphertext` and returns its blob ID.
+///
+/// Refuses, before touching the config, the wallet or the network, anything that is not age
+/// ciphertext.
 pub async fn store(
-    ciphertext: &[u8],
+    ciphertext: &Ciphertext,
     context: &str,
     epochs: u32,
     config_path: Option<&Path>,
 ) -> Result<String> {
+    ensure_age_ciphertext(ciphertext.as_bytes())?;
     let client = contract_client(config_path, context).await?;
 
     let args = StoreArgs::default_with_epochs(epochs);
     let results = client
-        .reserve_and_store_blobs(vec![ciphertext.to_vec()], &args)
+        .reserve_and_store_blobs(vec![ciphertext.as_bytes().to_vec()], &args)
         .await?;
     let result = results
         .first()
@@ -116,4 +132,89 @@ pub async fn delete(blob_id: &str, context: &str, config_path: Option<&Path>) ->
     let blob_id = parse_blob_id(blob_id)?;
     let client = contract_client(config_path, context).await?;
     Ok(client.delete_owned_blob(&blob_id).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault;
+
+    /// Things that must never reach Walrus: ordinary text, binary formats, near-misses of the age
+    /// header, and empty input.
+    fn cleartext_samples() -> Vec<Vec<u8>> {
+        vec![
+            b"my secret notes".to_vec(),
+            b"".to_vec(),
+            b"\x89PNG\r\n\x1a\n....".to_vec(),
+            b"-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n".to_vec(),
+            b"AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ".to_vec(),
+            b"age-encryption.org/v1".to_vec(),
+            b"age-encryption.org/v1\n".to_vec(),
+            b"age-encryption.org/v1\n-> X25519 AAAA\nBBBB\n".to_vec(),
+            b"age-encryption.org/v2\n--- AAAA\n".to_vec(),
+            vec![0u8; 1024],
+        ]
+    }
+
+    #[test]
+    fn guard_rejects_cleartext() {
+        for sample in cleartext_samples() {
+            let error = ensure_age_ciphertext(&sample).unwrap_err().to_string();
+            assert!(error.contains("refusing to upload"), "{sample:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn guard_accepts_what_seal_produces() {
+        for plaintext in cleartext_samples().iter().filter(|p| !p.is_empty()) {
+            let key = age::x25519::Identity::generate().to_public();
+            let bundle = vault::seal(plaintext, 0, &[key], None).unwrap();
+            ensure_age_ciphertext(bundle.ciphertext.as_bytes()).unwrap();
+        }
+    }
+
+    #[test]
+    fn sealed_output_never_contains_the_plaintext() {
+        let marker = b"PLAINTEXT-MARKER-0123456789-do-not-leak";
+        let mut plaintext = marker.repeat(50);
+        plaintext.extend_from_slice(b"tail");
+        let key = age::x25519::Identity::generate().to_public();
+        let bundle = vault::seal(&plaintext, 0, &[key], None).unwrap();
+        let found = bundle
+            .ciphertext
+            .as_bytes()
+            .windows(marker.len())
+            .any(|window| window == marker);
+        assert!(!found, "plaintext appears inside the ciphertext");
+    }
+
+    /// The real upload function refuses cleartext before it loads any config, opens the wallet
+    /// or touches the network. The config path below does not exist: if the guard ran later,
+    /// the error would be about the config instead.
+    #[tokio::test]
+    async fn store_refuses_cleartext_before_any_network_or_wallet_access() {
+        let missing = Path::new("/nonexistent/brine-test/client_config.yaml");
+        for sample in cleartext_samples() {
+            let cleartext = Ciphertext::unchecked_for_test(&sample);
+            let error = store(&cleartext, "testnet", 1, Some(missing))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("refusing to upload"), "{sample:?}: {error}");
+        }
+    }
+
+    /// For real ciphertext the guard passes and the upload moves on to the config, which
+    /// fails here because the file is missing. So the refusal above is not a blanket failure.
+    #[tokio::test]
+    async fn store_lets_real_ciphertext_past_the_guard() {
+        let missing = Path::new("/nonexistent/brine-test/client_config.yaml");
+        let key = age::x25519::Identity::generate().to_public();
+        let bundle = vault::seal(b"hello", 0, &[key], None).unwrap();
+        let error = store(&bundle.ciphertext, "testnet", 1, Some(missing))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("refusing to upload"), "{error}");
+    }
 }
